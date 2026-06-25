@@ -1,9 +1,10 @@
 import json
 import threading
 import time
+from collections import deque
 
 import cv2
-from flask import Flask, Response, render_template_string, request
+from flask import Flask, Response, render_template_string, request, redirect
 
 import rclpy
 from rclpy.node import Node
@@ -18,45 +19,15 @@ HTML = """
 <head>
     <title>Qwen Robot Dashboard</title>
     <style>
-        body {
-            font-family: Arial;
-            background: #111;
-            color: white;
-            text-align: center;
-        }
-        .card {
-            background: #222;
-            padding: 20px;
-            margin: 20px auto;
-            width: 85%;
-            max-width: 800px;
-            border-radius: 12px;
-        }
-        button {
-            font-size: 22px;
-            margin: 8px;
-            padding: 18px;
-            width: 170px;
-            border-radius: 10px;
-            border: none;
-        }
-        .stop {
-            background: #b00020;
-            color: white;
-        }
-        .status {
-            text-align: left;
-            display: inline-block;
-            font-size: 20px;
-        }
-        img {
-            max-width: 100%;
-            border-radius: 10px;
-            border: 2px solid #444;
-        }
-        code {
-            color: #00ff99;
-        }
+        body { font-family: Arial; background: #111; color: white; text-align: center; }
+        .card { background: #222; padding: 20px; margin: 20px auto; width: 85%; max-width: 850px; border-radius: 12px; }
+        button { font-size: 22px; margin: 8px; padding: 18px; width: 170px; border-radius: 10px; border: none; }
+        .stop { background: #b00020; color: white; }
+        .status { text-align: left; display: inline-block; font-size: 20px; }
+        img { max-width: 100%; border-radius: 10px; border: 2px solid #444; }
+        code { color: #00ff99; }
+        .log { text-align: left; background: #000; padding: 15px; border-radius: 8px; font-family: monospace; max-height: 260px; overflow-y: auto; }
+        .log-line { margin: 4px 0; color: #00ff99; }
     </style>
 </head>
 <body>
@@ -91,10 +62,19 @@ HTML = """
     </div>
 
     <div class="card">
+        <h2>Robot Log</h2>
+        <div class="log">
+            {% for line in logs %}
+                <div class="log-line">{{ line }}</div>
+            {% endfor %}
+        </div>
+    </div>
+
+    <div class="card">
         <p>Publishes to <code>/qwen_robot/command</code></p>
         <p>Reads status from <code>/qwen_robot/status</code></p>
         <p>Reads camera from <code>/image_raw</code></p>
-        <p><a href="/" style="color:#00ccff;">Refresh</a></p>
+        <p><a href="/" style="color:#00ccff;">Refresh Dashboard</a></p>
     </div>
 </body>
 </html>
@@ -108,6 +88,7 @@ class DashboardNode(Node):
         self.bridge = CvBridge()
         self.latest_frame = None
         self.frame_lock = threading.Lock()
+        self.logs = deque(maxlen=50)
 
         self.command_pub = self.create_publisher(String, '/qwen_robot/command', 10)
 
@@ -132,12 +113,18 @@ class DashboardNode(Node):
             'camera_ready': False,
         }
 
+        self.add_log('Dashboard started.')
         self.get_logger().info('Qwen Robot dashboard ROS node started.')
+
+    def add_log(self, text):
+        timestamp = time.strftime('%H:%M:%S')
+        self.logs.appendleft(f'{timestamp}  {text}')
 
     def publish_command(self, text):
         msg = String()
         msg.data = text
         self.command_pub.publish(msg)
+        self.add_log(f'Command sent: {text}')
         self.get_logger().info(f'Dashboard command: {text}')
 
     def status_callback(self, msg):
@@ -150,6 +137,9 @@ class DashboardNode(Node):
             else:
                 front_distance_text = f"{front_distance:.2f} m"
 
+            old_motion = self.status.get('motion_state')
+            old_command = self.status.get('last_command')
+
             self.status = {
                 'motion_state': data.get('motion_state', 'unknown'),
                 'last_command': data.get('last_command', 'none'),
@@ -157,8 +147,15 @@ class DashboardNode(Node):
                 'camera_ready': data.get('camera_ready', False),
             }
 
+            if self.status['motion_state'] != old_motion:
+                self.add_log(f"Motion state: {self.status['motion_state']}")
+
+            if self.status['last_command'] != old_command:
+                self.add_log(f"Last command: {self.status['last_command']}")
+
         except Exception as e:
             self.get_logger().warn(f'Status parse error: {e}')
+            self.add_log(f'Status parse error: {e}')
 
     def image_callback(self, msg):
         try:
@@ -167,12 +164,12 @@ class DashboardNode(Node):
                 self.latest_frame = frame
         except Exception as e:
             self.get_logger().warn(f'Image stream error: {e}')
+            self.add_log(f'Image stream error: {e}')
 
     def get_jpeg_frame(self):
         with self.frame_lock:
             if self.latest_frame is None:
                 return None
-
             frame = self.latest_frame.copy()
 
         success, buffer = cv2.imencode('.jpg', frame)
@@ -188,7 +185,11 @@ ros_node = None
 
 @app.route('/')
 def index():
-    return render_template_string(HTML, status=ros_node.status)
+    return render_template_string(
+        HTML,
+        status=ros_node.status,
+        logs=list(ros_node.logs)
+    )
 
 
 @app.route('/command', methods=['POST'])
@@ -198,7 +199,7 @@ def command():
     if ros_node is not None:
         ros_node.publish_command(cmd)
 
-    return render_template_string(HTML, status=ros_node.status)
+    return redirect('/')
 
 
 def generate_video():
