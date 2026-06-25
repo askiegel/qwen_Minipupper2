@@ -4,6 +4,7 @@ import time
 from collections import deque
 
 import cv2
+import psutil
 from flask import Flask, Response, render_template_string, request, redirect
 
 import rclpy
@@ -20,7 +21,7 @@ HTML = """
     <title>Qwen Robot Dashboard</title>
     <style>
         body { font-family: Arial; background: #111; color: white; text-align: center; }
-        .card { background: #222; padding: 20px; margin: 20px auto; width: 85%; max-width: 850px; border-radius: 12px; }
+        .card { background: #222; padding: 20px; margin: 20px auto; width: 85%; max-width: 900px; border-radius: 12px; }
         button { font-size: 22px; margin: 8px; padding: 18px; width: 170px; border-radius: 10px; border: none; }
         .stop { background: #b00020; color: white; }
         .status { text-align: left; display: inline-block; font-size: 20px; }
@@ -28,6 +29,8 @@ HTML = """
         code { color: #00ff99; }
         .log { text-align: left; background: #000; padding: 15px; border-radius: 8px; font-family: monospace; max-height: 260px; overflow-y: auto; }
         .log-line { margin: 4px 0; color: #00ff99; }
+        input[type=text] { font-size: 22px; padding: 14px; width: 70%; border-radius: 8px; border: none; }
+        .send { width: 120px; background: #0078d7; color: white; }
     </style>
 </head>
 <body>
@@ -39,12 +42,32 @@ HTML = """
     </div>
 
     <div class="card">
+        <h2>Command Console</h2>
+        <form method="post" action="/command">
+            <input type="text" name="cmd" placeholder="Type command: forward, stop, status, take picture">
+            <button class="send" type="submit">Send</button>
+        </form>
+    </div>
+
+    <div class="card">
         <h2>Robot Status</h2>
         <div class="status">
             <p><b>Motion:</b> {{ status.motion_state }}</p>
             <p><b>Last Command:</b> {{ status.last_command }}</p>
             <p><b>Front Distance:</b> {{ status.front_distance }}</p>
             <p><b>Camera Ready:</b> {{ status.camera_ready }}</p>
+        </div>
+    </div>
+
+    <div class="card">
+        <h2>System Health</h2>
+        <div class="status">
+            <p><b>CPU:</b> {{ health.cpu }}%</p>
+            <p><b>RAM:</b> {{ health.ram_percent }}% used</p>
+            <p><b>RAM Used:</b> {{ health.ram_used }} / {{ health.ram_total }} GB</p>
+            <p><b>Disk:</b> {{ health.disk }}% used</p>
+            <p><b>Uptime:</b> {{ health.uptime }}</p>
+            <p><b>Temperature:</b> {{ health.temperature }}</p>
         </div>
     </div>
 
@@ -179,6 +202,33 @@ class DashboardNode(Node):
         return buffer.tobytes()
 
 
+def get_temperature():
+    try:
+        with open('/sys/class/thermal/thermal_zone0/temp', 'r') as f:
+            temp_c = int(f.read().strip()) / 1000.0
+            return f'{temp_c:.1f} °C'
+    except Exception:
+        return 'Unavailable'
+
+
+def get_health():
+    ram = psutil.virtual_memory()
+    disk = psutil.disk_usage('/')
+    uptime_seconds = int(time.time() - psutil.boot_time())
+    hours = uptime_seconds // 3600
+    minutes = (uptime_seconds % 3600) // 60
+
+    return {
+        'cpu': psutil.cpu_percent(interval=0.1),
+        'ram_percent': ram.percent,
+        'ram_used': round(ram.used / (1024 ** 3), 2),
+        'ram_total': round(ram.total / (1024 ** 3), 2),
+        'disk': disk.percent,
+        'uptime': f'{hours}h {minutes}m',
+        'temperature': get_temperature(),
+    }
+
+
 app = Flask(__name__)
 ros_node = None
 
@@ -188,15 +238,16 @@ def index():
     return render_template_string(
         HTML,
         status=ros_node.status,
-        logs=list(ros_node.logs)
+        logs=list(ros_node.logs),
+        health=get_health()
     )
 
 
 @app.route('/command', methods=['POST'])
 def command():
-    cmd = request.form.get('cmd', 'stop')
+    cmd = request.form.get('cmd', 'stop').strip()
 
-    if ros_node is not None:
+    if cmd and ros_node is not None:
         ros_node.publish_command(cmd)
 
     return redirect('/')
