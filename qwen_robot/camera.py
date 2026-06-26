@@ -12,6 +12,12 @@ class CameraManager:
             desired_encoding='bgr8'
         )
 
+    def get_latest(self):
+        if self.latest_image is None:
+            return None
+
+        return self.latest_image.copy()
+
     def save(self, filename='/tmp/qwen_robot_camera.jpg'):
         if self.latest_image is None:
             return None
