@@ -52,6 +52,10 @@ class QwenRobot(Node):
         self.follow_mode = False
         self.follow_target = None
 
+        self.find_mode = False
+        self.find_object = None
+        self.find_target = None
+
         self.motion_state = 'stopped'
         self.camera_ready = False
 
@@ -60,9 +64,9 @@ class QwenRobot(Node):
         self.create_subscription(Image, '/image_raw', self.image_callback, 10)
 
         self.create_timer(1.0, self.publish_status)
-        self.create_timer(0.5, self.follow_loop)
+        self.create_timer(0.5, self.behavior_loop)
 
-        self.get_logger().info('Qwen Robot started with person-follow mode.')
+        self.get_logger().info('Qwen Robot started with object search mode.')
         self.get_logger().info(f'Vision server: {VISION_SERVER_URL}')
 
     def scan_callback(self, msg):
@@ -91,6 +95,9 @@ class QwenRobot(Node):
             'memory_count': self.memory.count(),
             'follow_mode': self.follow_mode,
             'follow_target': self.follow_target,
+            'find_mode': self.find_mode,
+            'find_object': self.find_object,
+            'find_target': self.find_target,
         }
 
         msg = String()
@@ -110,22 +117,31 @@ class QwenRobot(Node):
 
         action = plan.get('action', 'UNKNOWN')
 
-        if action == 'FOLLOW_PERSON':
+        if action == 'FIND_OBJECT':
+            self.follow_mode = False
+            self.find_mode = True
+            self.find_object = plan.get('object', 'backpack')
+            self.find_target = None
+            self.motion_state = 'searching'
+            self.last_message = f'Searching for {self.find_object}.'
+
+        elif action == 'FOLLOW_PERSON':
+            self.find_mode = False
             self.follow_mode = True
+            self.find_target = None
             self.last_message = 'Follow mode enabled.'
             self.motion_state = 'following_person'
 
         elif action == 'MOVE':
-            self.follow_mode = False
+            self.stop_behaviors()
             self.motion_state, self.last_message = self.controller.handle_move(plan)
 
         elif action == 'TURN':
-            self.follow_mode = False
+            self.stop_behaviors()
             self.motion_state, self.last_message = self.controller.handle_turn(plan)
 
         elif action == 'STOP':
-            self.follow_mode = False
-            self.follow_target = None
+            self.stop_behaviors()
             self.motion_state, self.last_message = self.controller.handle_stop()
 
         elif action == 'PICTURE':
@@ -155,19 +171,41 @@ class QwenRobot(Node):
         self.get_logger().info(f'Message: {self.last_message}')
         self.publish_status()
 
-    def follow_loop(self):
-        if not self.follow_mode:
+    def stop_behaviors(self):
+        self.follow_mode = False
+        self.follow_target = None
+        self.find_mode = False
+        self.find_object = None
+        self.find_target = None
+
+    def behavior_loop(self):
+        if self.follow_mode:
+            result = self.controller.follow_person_step()
+
+            self.motion_state = result.get('state', 'following_person')
+            self.last_message = result.get('message', 'Following person.')
+            self.follow_target = result.get('target')
+            self.last_vision = result.get('vision', self.last_vision)
+
+            self.get_logger().info(f'Follow: {self.last_message}')
+            self.publish_status()
             return
 
-        result = self.controller.follow_person_step()
+        if self.find_mode and self.find_object:
+            result = self.controller.find_object_step(self.find_object, follow=False)
 
-        self.motion_state = result.get('state', 'following_person')
-        self.last_message = result.get('message', 'Following person.')
-        self.follow_target = result.get('target')
-        self.last_vision = result.get('vision', self.last_vision)
+            self.motion_state = result.get('state', 'searching')
+            self.last_message = result.get('message', f'Searching for {self.find_object}.')
+            self.find_target = result.get('target')
+            self.last_vision = result.get('vision', self.last_vision)
 
-        self.get_logger().info(f'Follow: {self.last_message}')
-        self.publish_status()
+            if result.get('found', False) and self.motion_state == 'target_centered':
+                self.motion.stop()
+                self.find_mode = False
+                self.last_message = f'I found the {self.find_object}.'
+
+            self.get_logger().info(f'Find: {self.last_message}')
+            self.publish_status()
 
 
 def main(args=None):

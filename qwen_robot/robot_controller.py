@@ -58,14 +58,10 @@ class RobotController:
     def handle_vision(self):
         frame = self.camera.get_latest()
         self.logger.info('Sending frame to vision server...')
-
         result = self.vision.analyze_frame(frame)
         observation = self.memory.add_vision_observation(result)
-
         description = result.get('description', 'No description.')
         self.logger.info(f'Vision: {description}')
-        self.logger.info(f'Memory observations: {self.memory.count()}')
-
         return 'stopped', description, result, observation
 
     def handle_memory(self):
@@ -75,25 +71,26 @@ class RobotController:
         return 'stopped', self.memory.compare_latest_two()
 
     def follow_person_step(self):
+        return self.find_object_step('person', follow=True)
+
+    def find_object_step(self, target_label, follow=False):
         frame = self.camera.get_latest()
         result = self.vision.analyze_frame(frame)
 
         detections = result.get('detections', [])
-        people = [d for d in detections if d.get('label') == 'person']
+        targets = [d for d in detections if d.get('label') == target_label]
 
-        if not people:
+        if not targets:
             self.motion.move(linear_x=0.0, angular_z=0.18, duration=0.25)
             return {
                 'state': 'searching',
-                'message': 'No person detected. Searching slowly.',
+                'message': f'No {target_label} detected. Searching slowly.',
                 'target': None,
-                'vision': result
+                'vision': result,
+                'found': False
             }
 
-        target = max(
-            people,
-            key=lambda d: d.get('width', 0) * d.get('height', 0)
-        )
+        target = max(targets, key=lambda d: d.get('width', 0) * d.get('height', 0))
 
         center_x = target.get('center_x', 320)
         image_width = target.get('image_width', 640)
@@ -104,51 +101,39 @@ class RobotController:
         error = center_x - image_center
         normalized_error = error / image_center
 
-        # Proportional steering
         kp_turn = 0.45
         angular_z = -kp_turn * normalized_error
-
-        # Clamp turn speed
         angular_z = max(-0.35, min(angular_z, 0.35))
 
-        # Distance control using box height
-        if box_height < 220:
-            linear_x = 0.045
-        elif box_height < 320:
-            linear_x = 0.025
-        else:
-            linear_x = 0.0
-
-        # Safety stop if obstacle is close
-        if self.lidar.blocked(0.45):
-            linear_x = 0.0
-
-        # Small deadband to avoid jitter
         if abs(normalized_error) < 0.08:
             angular_z = 0.0
 
-        self.motion.move(
-            linear_x=linear_x,
-            angular_z=angular_z,
-            duration=0.25
-        )
+        if follow:
+            if box_height < 220:
+                linear_x = 0.045
+            elif box_height < 320:
+                linear_x = 0.025
+            else:
+                linear_x = 0.0
 
-        if linear_x > 0 and abs(angular_z) > 0:
-            state = 'following_adjusting'
-            message = f'Following person. Moving and steering. Error {error:.0f}px.'
-        elif linear_x > 0:
-            state = 'following_forward'
-            message = f'Person centered. Moving forward. Confidence {confidence:.2f}.'
-        elif abs(angular_z) > 0:
-            state = 'following_turning'
-            message = f'Centering person. Error {error:.0f}px. Confidence {confidence:.2f}.'
+            if self.lidar.blocked(0.45):
+                linear_x = 0.0
         else:
-            state = 'holding_position'
-            message = f'Person centered and close. Holding position. Confidence {confidence:.2f}.'
+            linear_x = 0.0
+
+        self.motion.move(linear_x=linear_x, angular_z=angular_z, duration=0.25)
+
+        if abs(angular_z) > 0:
+            state = 'centering_target'
+            message = f'Found {target_label}. Centering target. Error {error:.0f}px. Confidence {confidence:.2f}.'
+        else:
+            state = 'target_centered'
+            message = f'Found {target_label}. Target centered. Confidence {confidence:.2f}.'
 
         return {
             'state': state,
             'message': message,
             'target': target,
-            'vision': result
+            'vision': result,
+            'found': True
         }

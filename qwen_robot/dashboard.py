@@ -144,6 +144,7 @@ class DashboardNode(Node):
 
         self.raw_detections = []
         self.follow_target = None
+        self.find_target = None
 
         self.add_log('Dashboard started.')
         self.get_logger().info('Qwen Robot dashboard ROS node started.')
@@ -196,6 +197,7 @@ class DashboardNode(Node):
 
             self.raw_detections = detections if isinstance(detections, list) else []
             self.follow_target = data.get('follow_target', None)
+            self.find_target = data.get('find_target', None)
 
             if self.status['last_command'] != old_command:
                 self.add_log(f"Last command: {self.status['last_command']}")
@@ -249,7 +251,7 @@ class DashboardNode(Node):
             )
 
         # Follow target center marker and steering text
-        target = self.follow_target
+        target = self.follow_target if self.follow_target is not None else self.find_target
         if isinstance(target, dict):
             cx = int(target.get('center_x', w // 2))
             cy = int(target.get('center_y', h // 2))
