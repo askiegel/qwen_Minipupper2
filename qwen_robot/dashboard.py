@@ -31,6 +31,7 @@ HTML = """
         .log-line { margin: 4px 0; color: #00ff99; }
         input[type=text] { font-size: 22px; padding: 14px; width: 70%; border-radius: 8px; border: none; }
         .send { width: 120px; background: #0078d7; color: white; }
+        .vision { text-align: left; display: inline-block; font-size: 20px; max-width: 750px; }
     </style>
 </head>
 <body>
@@ -44,9 +45,17 @@ HTML = """
     <div class="card">
         <h2>Command Console</h2>
         <form method="post" action="/command">
-            <input type="text" name="cmd" placeholder="Type command: forward, stop, status, take picture">
+            <input type="text" name="cmd" placeholder="Try: what do you see, forward, stop, status">
             <button class="send" type="submit">Send</button>
         </form>
+    </div>
+
+    <div class="card">
+        <h2>Vision Result</h2>
+        <div class="vision">
+            <p><b>Description:</b> {{ vision.description }}</p>
+            <p><b>Objects:</b> {{ vision.objects }}</p>
+        </div>
     </div>
 
     <div class="card">
@@ -54,6 +63,7 @@ HTML = """
         <div class="status">
             <p><b>Motion:</b> {{ status.motion_state }}</p>
             <p><b>Last Command:</b> {{ status.last_command }}</p>
+            <p><b>Last Action:</b> {{ status.last_action }}</p>
             <p><b>Front Distance:</b> {{ status.front_distance }}</p>
             <p><b>Camera Ready:</b> {{ status.camera_ready }}</p>
         </div>
@@ -80,6 +90,7 @@ HTML = """
             <button name="cmd" value="right">Right</button><br>
             <button name="cmd" value="backward">Backward</button><br>
             <button name="cmd" value="take picture">Take Picture</button>
+            <button name="cmd" value="what do you see">What Do You See?</button>
             <button name="cmd" value="status">Status</button>
         </form>
     </div>
@@ -132,8 +143,14 @@ class DashboardNode(Node):
         self.status = {
             'motion_state': 'unknown',
             'last_command': 'none',
+            'last_action': 'none',
             'front_distance': 'unknown',
             'camera_ready': False,
+        }
+
+        self.vision = {
+            'objects': 'None',
+            'description': 'No vision result yet.'
         }
 
         self.add_log('Dashboard started.')
@@ -162,12 +179,28 @@ class DashboardNode(Node):
 
             old_motion = self.status.get('motion_state')
             old_command = self.status.get('last_command')
+            old_vision_description = self.vision.get('description')
 
             self.status = {
                 'motion_state': data.get('motion_state', 'unknown'),
                 'last_command': data.get('last_command', 'none'),
+                'last_action': data.get('last_action', 'none'),
                 'front_distance': front_distance_text,
                 'camera_ready': data.get('camera_ready', False),
+            }
+
+            last_vision = data.get('last_vision', {})
+            objects = last_vision.get('objects', [])
+            description = last_vision.get('description', 'No vision result yet.')
+
+            if isinstance(objects, list):
+                objects_text = ', '.join(objects) if objects else 'None'
+            else:
+                objects_text = str(objects)
+
+            self.vision = {
+                'objects': objects_text,
+                'description': description,
             }
 
             if self.status['motion_state'] != old_motion:
@@ -175,6 +208,9 @@ class DashboardNode(Node):
 
             if self.status['last_command'] != old_command:
                 self.add_log(f"Last command: {self.status['last_command']}")
+
+            if self.vision['description'] != old_vision_description:
+                self.add_log(f"Vision: {self.vision['description']}")
 
         except Exception as e:
             self.get_logger().warn(f'Status parse error: {e}')
@@ -238,6 +274,7 @@ def index():
     return render_template_string(
         HTML,
         status=ros_node.status,
+        vision=ros_node.vision,
         logs=list(ros_node.logs),
         health=get_health()
     )
