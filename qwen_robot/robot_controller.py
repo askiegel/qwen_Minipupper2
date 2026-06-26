@@ -16,7 +16,6 @@ class RobotController:
             if self.lidar.blocked(0.35):
                 self.motion.stop()
                 return 'blocked', 'Forward blocked by obstacle.'
-
             self.motion.move(linear_x=speed, angular_z=0.0, duration=duration)
             return 'stopped', 'Moved forward.'
 
@@ -70,9 +69,86 @@ class RobotController:
         return 'stopped', description, result, observation
 
     def handle_memory(self):
-        summary = self.memory.summary()
-        return 'stopped', summary
+        return 'stopped', self.memory.summary()
 
     def handle_compare(self):
-        comparison = self.memory.compare_latest_two()
-        return 'stopped', comparison
+        return 'stopped', self.memory.compare_latest_two()
+
+    def follow_person_step(self):
+        frame = self.camera.get_latest()
+        result = self.vision.analyze_frame(frame)
+
+        detections = result.get('detections', [])
+        people = [d for d in detections if d.get('label') == 'person']
+
+        if not people:
+            self.motion.move(linear_x=0.0, angular_z=0.18, duration=0.25)
+            return {
+                'state': 'searching',
+                'message': 'No person detected. Searching slowly.',
+                'target': None,
+                'vision': result
+            }
+
+        target = max(
+            people,
+            key=lambda d: d.get('width', 0) * d.get('height', 0)
+        )
+
+        center_x = target.get('center_x', 320)
+        image_width = target.get('image_width', 640)
+        box_height = target.get('height', 0)
+        confidence = target.get('confidence', 0.0)
+
+        image_center = image_width / 2.0
+        error = center_x - image_center
+        normalized_error = error / image_center
+
+        # Proportional steering
+        kp_turn = 0.45
+        angular_z = -kp_turn * normalized_error
+
+        # Clamp turn speed
+        angular_z = max(-0.35, min(angular_z, 0.35))
+
+        # Distance control using box height
+        if box_height < 220:
+            linear_x = 0.045
+        elif box_height < 320:
+            linear_x = 0.025
+        else:
+            linear_x = 0.0
+
+        # Safety stop if obstacle is close
+        if self.lidar.blocked(0.45):
+            linear_x = 0.0
+
+        # Small deadband to avoid jitter
+        if abs(normalized_error) < 0.08:
+            angular_z = 0.0
+
+        self.motion.move(
+            linear_x=linear_x,
+            angular_z=angular_z,
+            duration=0.25
+        )
+
+        if linear_x > 0 and abs(angular_z) > 0:
+            state = 'following_adjusting'
+            message = f'Following person. Moving and steering. Error {error:.0f}px.'
+        elif linear_x > 0:
+            state = 'following_forward'
+            message = f'Person centered. Moving forward. Confidence {confidence:.2f}.'
+        elif abs(angular_z) > 0:
+            state = 'following_turning'
+            message = f'Centering person. Error {error:.0f}px. Confidence {confidence:.2f}.'
+        else:
+            state = 'holding_position'
+            message = f'Person centered and close. Holding position. Confidence {confidence:.2f}.'
+
+        return {
+            'state': state,
+            'message': message,
+            'target': target,
+            'vision': result
+        }

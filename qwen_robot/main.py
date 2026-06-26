@@ -45,44 +45,24 @@ class QwenRobot(Node):
         self.last_action = 'none'
         self.last_plan = {}
         self.last_message = 'none'
-        self.last_vision = {
-            "objects": [],
-            "description": "No vision result yet."
-        }
+        self.last_vision = {"objects": [], "description": "No vision result yet."}
         self.last_memory = {}
         self.last_compare = {}
+
+        self.follow_mode = False
+        self.follow_target = None
 
         self.motion_state = 'stopped'
         self.camera_ready = False
 
-        self.command_sub = self.create_subscription(
-            String,
-            '/qwen_robot/command',
-            self.command_callback,
-            10
-        )
+        self.create_subscription(String, '/qwen_robot/command', self.command_callback, 10)
+        self.create_subscription(LaserScan, '/scan', self.scan_callback, 10)
+        self.create_subscription(Image, '/image_raw', self.image_callback, 10)
 
-        self.scan_sub = self.create_subscription(
-            LaserScan,
-            '/scan',
-            self.scan_callback,
-            10
-        )
+        self.create_timer(1.0, self.publish_status)
+        self.create_timer(0.5, self.follow_loop)
 
-        self.image_sub = self.create_subscription(
-            Image,
-            '/image_raw',
-            self.image_callback,
-            10
-        )
-
-        self.status_timer = self.create_timer(1.0, self.publish_status)
-
-        self.get_logger().info('Qwen Robot started with controller refactor.')
-        self.get_logger().info('Command topic: /qwen_robot/command')
-        self.get_logger().info('Status topic: /qwen_robot/status')
-        self.get_logger().info('LiDAR topic: /scan')
-        self.get_logger().info('Camera topic: /image_raw')
+        self.get_logger().info('Qwen Robot started with person-follow mode.')
         self.get_logger().info(f'Vision server: {VISION_SERVER_URL}')
 
     def scan_callback(self, msg):
@@ -109,6 +89,8 @@ class QwenRobot(Node):
             'front_distance': self.lidar.front_distance,
             'camera_ready': self.camera_ready,
             'memory_count': self.memory.count(),
+            'follow_mode': self.follow_mode,
+            'follow_target': self.follow_target,
         }
 
         msg = String()
@@ -125,17 +107,25 @@ class QwenRobot(Node):
 
         self.get_logger().info(f'Received: {text}')
         self.get_logger().info(f'Plan: {plan}')
-        self.get_logger().info(f'Front distance: {self.lidar.front_distance}')
 
         action = plan.get('action', 'UNKNOWN')
 
-        if action == 'MOVE':
+        if action == 'FOLLOW_PERSON':
+            self.follow_mode = True
+            self.last_message = 'Follow mode enabled.'
+            self.motion_state = 'following_person'
+
+        elif action == 'MOVE':
+            self.follow_mode = False
             self.motion_state, self.last_message = self.controller.handle_move(plan)
 
         elif action == 'TURN':
+            self.follow_mode = False
             self.motion_state, self.last_message = self.controller.handle_turn(plan)
 
         elif action == 'STOP':
+            self.follow_mode = False
+            self.follow_target = None
             self.motion_state, self.last_message = self.controller.handle_stop()
 
         elif action == 'PICTURE':
@@ -163,6 +153,20 @@ class QwenRobot(Node):
             self.get_logger().warn('Unknown command.')
 
         self.get_logger().info(f'Message: {self.last_message}')
+        self.publish_status()
+
+    def follow_loop(self):
+        if not self.follow_mode:
+            return
+
+        result = self.controller.follow_person_step()
+
+        self.motion_state = result.get('state', 'following_person')
+        self.last_message = result.get('message', 'Following person.')
+        self.follow_target = result.get('target')
+        self.last_vision = result.get('vision', self.last_vision)
+
+        self.get_logger().info(f'Follow: {self.last_message}')
         self.publish_status()
 
 
