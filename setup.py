@@ -40,6 +40,9 @@ setup(
             'qwen_robot = qwen_robot.main:main',
             'qwen_voice = qwen_robot.voice:main',
             'qwen_dashboard = qwen_robot.dashboard:main',
+            'vision_check = qwen_robot.vision_check:main',
+            'target_check = qwen_robot.target_check:main',
+            'backpack_follow = qwen_robot.backpack_follow:main',
         ],
     },
 )
