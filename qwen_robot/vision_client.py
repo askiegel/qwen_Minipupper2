@@ -3,48 +3,44 @@ import requests
 
 
 class VisionClient:
-    def __init__(self, server_url):
-        self.server_url = server_url.rstrip("/")
-        self.last_result = {
-            "objects": [],
-            "description": "No vision result yet."
-        }
+    def __init__(self, url, timeout=1.0):
+        self.url = url
+        self.timeout = timeout
 
-    def analyze_frame(self, frame):
-        if frame is None:
-            self.last_result = {
-                "objects": [],
-                "description": "No camera image available."
-            }
-            return self.last_result
-
-        ok, buffer = cv2.imencode(".jpg", frame)
-
-        if not ok:
-            self.last_result = {
-                "objects": [],
-                "description": "Could not encode camera image."
-            }
-            return self.last_result
-
-        files = {
-            "file": ("frame.jpg", buffer.tobytes(), "image/jpeg")
-        }
-
+    def get_detections_from_frame(self, frame):
         try:
+            if frame is None:
+                return []
+
+            ok, encoded = cv2.imencode(".jpg", frame)
+
+            if not ok:
+                return []
+
+            files = {
+                "file": (
+                    "frame.jpg",
+                    encoded.tobytes(),
+                    "image/jpeg",
+                )
+            }
+
             response = requests.post(
-                f"{self.server_url}/detect",
+                self.url,
                 files=files,
-                timeout=10
+                timeout=self.timeout,
             )
 
             response.raise_for_status()
-            self.last_result = response.json()
-            return self.last_result
+            data = response.json()
 
-        except Exception as e:
-            self.last_result = {
-                "objects": [],
-                "description": f"Vision server error: {e}"
-            }
-            return self.last_result
+            if isinstance(data, dict):
+                return data.get("detections", [])
+
+            if isinstance(data, list):
+                return data
+
+            return []
+
+        except Exception:
+            return []

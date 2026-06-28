@@ -1,220 +1,127 @@
-import json
+import os
+import time
 
 import rclpy
 from rclpy.node import Node
 
 from geometry_msgs.msg import Twist
-from std_msgs.msg import String
-from sensor_msgs.msg import LaserScan, Image
+from sensor_msgs.msg import Image
 from cv_bridge import CvBridge
 
-from .motion import MotionController
-from .lidar import LidarSafety
-from .camera import CameraManager
-from .planner import Planner
 from .vision_client import VisionClient
-from .memory import RobotMemory
-from .robot_controller import RobotController
-from .config import VISION_SERVER_URL
+from .object_tracker import ObjectTracker
+from .follow_manager import FollowManager
 
 
-class QwenRobot(Node):
+class QwenRobotNode(Node):
     def __init__(self):
-        super().__init__('qwen_robot')
+        super().__init__("qwen_robot")
 
-        self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
-        self.status_pub = self.create_publisher(String, '/qwen_robot/status', 10)
+        self.cmd_pub = self.create_publisher(Twist, "/cmd_vel", 10)
 
-        self.motion = MotionController(self.cmd_pub)
-        self.lidar = LidarSafety()
-        self.camera = CameraManager(CvBridge())
-        self.planner = Planner()
-        self.vision = VisionClient(VISION_SERVER_URL)
-        self.memory = RobotMemory()
+        self.bridge = CvBridge()
+        self.latest_frame = None
+        self.frame_count = 0
+        self.loop_count = 0
 
-        self.controller = RobotController(
-            motion=self.motion,
-            lidar=self.lidar,
-            camera=self.camera,
-            vision=self.vision,
-            memory=self.memory,
-            logger=self.get_logger()
+        self.image_sub = self.create_subscription(
+            Image,
+            "/image_raw",
+            self.image_callback,
+            10,
         )
 
-        self.last_command = 'none'
-        self.last_action = 'none'
-        self.last_plan = {}
-        self.last_message = 'none'
-        self.last_vision = {"objects": [], "description": "No vision result yet."}
-        self.last_memory = {}
-        self.last_compare = {}
+        vision_url = os.getenv(
+            "VISION_SERVER_URL",
+            "http://192.168.68.100:8000/detect",
+        )
 
-        self.follow_mode = False
-        self.follow_target = None
+        target_object = os.getenv(
+            "TARGET_OBJECT",
+            "backpack",
+        )
 
-        self.find_mode = False
-        self.find_object = None
-        self.find_target = None
+        self.vision = VisionClient(vision_url, timeout=0.7)
+        self.tracker = ObjectTracker(target_object)
+        self.follow = FollowManager()
 
-        self.motion_state = 'stopped'
-        self.camera_ready = False
+        self.get_logger().info("Qwen Robot repeating follower started")
+        self.get_logger().info(f"Vision URL: {vision_url}")
+        self.get_logger().info(f"Target object: {target_object}")
+        self.get_logger().info("Subscribing to /image_raw")
 
-        self.create_subscription(String, '/qwen_robot/command', self.command_callback, 10)
-        self.create_subscription(LaserScan, '/scan', self.scan_callback, 10)
-        self.create_subscription(Image, '/image_raw', self.image_callback, 10)
-
-        self.create_timer(1.0, self.publish_status)
-        self.create_timer(0.5, self.behavior_loop)
-
-        self.get_logger().info('Qwen Robot started with object search mode.')
-        self.get_logger().info(f'Vision server: {VISION_SERVER_URL}')
-
-    def scan_callback(self, msg):
-        self.lidar.update(msg)
+        self.timer = self.create_timer(0.5, self.update)
 
     def image_callback(self, msg):
         try:
-            self.camera.update(msg)
-            self.camera_ready = True
-        except Exception as e:
-            self.camera_ready = False
-            self.get_logger().warn(f'Camera error: {e}')
-
-    def publish_status(self):
-        status = {
-            'motion_state': self.motion_state,
-            'last_command': self.last_command,
-            'last_action': self.last_action,
-            'last_plan': self.last_plan,
-            'last_message': self.last_message,
-            'last_vision': self.last_vision,
-            'last_memory': self.last_memory,
-            'last_compare': self.last_compare,
-            'front_distance': self.lidar.front_distance,
-            'camera_ready': self.camera_ready,
-            'memory_count': self.memory.count(),
-            'follow_mode': self.follow_mode,
-            'follow_target': self.follow_target,
-            'find_mode': self.find_mode,
-            'find_object': self.find_object,
-            'find_target': self.find_target,
-        }
-
-        msg = String()
-        msg.data = json.dumps(status)
-        self.status_pub.publish(msg)
-
-    def command_callback(self, msg):
-        text = msg.data.lower().strip()
-        plan = self.planner.plan(text)
-
-        self.last_command = text
-        self.last_plan = plan
-        self.last_action = plan.get('action', 'UNKNOWN')
-
-        self.get_logger().info(f'Received: {text}')
-        self.get_logger().info(f'Plan: {plan}')
-
-        action = plan.get('action', 'UNKNOWN')
-
-        if action == 'FIND_OBJECT':
-            self.follow_mode = False
-            self.find_mode = True
-            self.find_object = plan.get('object', 'backpack')
-            self.find_target = None
-            self.motion_state = 'searching'
-            self.last_message = f'Searching for {self.find_object}.'
-
-        elif action == 'FOLLOW_PERSON':
-            self.find_mode = False
-            self.follow_mode = True
-            self.find_target = None
-            self.last_message = 'Follow mode enabled.'
-            self.motion_state = 'following_person'
-
-        elif action == 'MOVE':
-            self.stop_behaviors()
-            self.motion_state, self.last_message = self.controller.handle_move(plan)
-
-        elif action == 'TURN':
-            self.stop_behaviors()
-            self.motion_state, self.last_message = self.controller.handle_turn(plan)
-
-        elif action == 'STOP':
-            self.stop_behaviors()
-            self.motion_state, self.last_message = self.controller.handle_stop()
-
-        elif action == 'PICTURE':
-            self.motion_state, self.last_message = self.controller.handle_picture()
-
-        elif action == 'STATUS':
-            self.motion_state, self.last_message = self.controller.handle_status()
-
-        elif action == 'VISION':
-            self.motion_state, self.last_message, self.last_vision, observation = (
-                self.controller.handle_vision()
+            self.latest_frame = self.bridge.imgmsg_to_cv2(
+                msg,
+                desired_encoding="bgr8",
             )
-            self.last_memory = self.memory.summary()
+            self.frame_count += 1
 
-        elif action == 'MEMORY':
-            self.motion_state, self.last_memory = self.controller.handle_memory()
-            self.last_message = 'Memory summary updated.'
+        except Exception as e:
+            self.get_logger().warn(f"Camera conversion failed: {e}")
+            self.latest_frame = None
 
-        elif action == 'COMPARE':
-            self.motion_state, self.last_compare = self.controller.handle_compare()
-            self.last_message = self.last_compare.get('message', 'Comparison complete.')
+    def update(self):
+        self.loop_count += 1
 
-        else:
-            self.last_message = 'Unknown command.'
-            self.get_logger().warn('Unknown command.')
-
-        self.get_logger().info(f'Message: {self.last_message}')
-        self.publish_status()
-
-    def stop_behaviors(self):
-        self.follow_mode = False
-        self.follow_target = None
-        self.find_mode = False
-        self.find_object = None
-        self.find_target = None
-
-    def behavior_loop(self):
-        if self.follow_mode:
-            result = self.controller.follow_person_step()
-
-            self.motion_state = result.get('state', 'following_person')
-            self.last_message = result.get('message', 'Following person.')
-            self.follow_target = result.get('target')
-            self.last_vision = result.get('vision', self.last_vision)
-
-            self.get_logger().info(f'Follow: {self.last_message}')
-            self.publish_status()
+        if self.latest_frame is None:
+            self.get_logger().info(
+                f"LOOP {self.loop_count} | NO_CAMERA_FRAME | frames={self.frame_count}"
+            )
             return
 
-        if self.find_mode and self.find_object:
-            result = self.controller.find_object_step(self.find_object, follow=False)
+        start = time.time()
 
-            self.motion_state = result.get('state', 'searching')
-            self.last_message = result.get('message', f'Searching for {self.find_object}.')
-            self.find_target = result.get('target')
-            self.last_vision = result.get('vision', self.last_vision)
+        detections = self.vision.get_detections_from_frame(self.latest_frame)
 
-            if result.get('found', False) and self.motion_state == 'target_centered':
-                self.motion.stop()
-                self.find_mode = False
-                self.last_message = f'I found the {self.find_object}.'
+        elapsed = time.time() - start
 
-            self.get_logger().info(f'Find: {self.last_message}')
-            self.publish_status()
+        target = self.tracker.select_target(detections)
+
+        cmd, state = self.follow.compute_cmd(target)
+        self.cmd_pub.publish(cmd)
+
+        if target is None:
+            labels = [d.get("label") for d in detections if d.get("label")]
+            self.get_logger().info(
+                f"LOOP {self.loop_count} | NO_TARGET | "
+                f"frames={self.frame_count} | "
+                f"seen={labels} | "
+                f"vision_time={elapsed:.2f}s"
+            )
+            return
+
+        self.get_logger().info(
+            f"LOOP {self.loop_count} | "
+            f"{state} | "
+            f"{target['label']} | "
+            f"conf={target['confidence']:.2f} | "
+            f"cx={target['cx']:.1f} | "
+            f"area={target['area']:.0f} | "
+            f"frames={self.frame_count} | "
+            f"vision_time={elapsed:.2f}s"
+        )
 
 
 def main(args=None):
     rclpy.init(args=args)
-    node = QwenRobot()
-    rclpy.spin(node)
+
+    node = QwenRobotNode()
+
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+
+    stop = Twist()
+    node.cmd_pub.publish(stop)
+
     node.destroy_node()
     rclpy.shutdown()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
