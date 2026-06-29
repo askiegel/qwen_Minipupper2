@@ -1,12 +1,14 @@
 import os
 import time
 import math
+import json
 
 import rclpy
 from rclpy.node import Node
 
 from geometry_msgs.msg import Twist
 from sensor_msgs.msg import Image, LaserScan
+from std_msgs.msg import String
 from cv_bridge import CvBridge
 
 from .vision_client import VisionClient
@@ -22,12 +24,25 @@ class QwenRobotNode(Node):
         super().__init__("qwen_robot")
 
         self.cmd_pub = self.create_publisher(Twist, "/cmd_vel", 10)
+        self.status_pub = self.create_publisher(String, "/qwen_status", 10)
+
+        self.mission_sub = self.create_subscription(
+            String,
+            "/qwen_mission",
+            self.mission_callback,
+            10,
+        )
 
         self.bridge = CvBridge()
         self.latest_frame = None
         self.frame_count = 0
         self.loop_count = 0
         self.front_distance = None
+
+        self.last_cmd = Twist()
+        self.last_target_label = "none"
+        self.last_state = "IDLE"
+        self.last_vision_time = 0.0
 
         self.image_sub = self.create_subscription(
             Image,
@@ -43,7 +58,7 @@ class QwenRobotNode(Node):
             10,
         )
 
-        vision_url = os.getenv(
+        self.vision_url = os.getenv(
             "VISION_SERVER_URL",
             "http://192.168.68.100:8000/detect",
         )
@@ -53,32 +68,40 @@ class QwenRobotNode(Node):
             "FOLLOW_PERSON",
         )
 
-        target_override = os.getenv(
-            "TARGET_OBJECT",
-            "",
-        )
-
         self.mission = MissionManager(mission_name)
+        target_object = self.mission.get_target_object() or "person"
 
-        if target_override:
-            target_object = target_override
-        else:
-            target_object = self.mission.get_target_object() or "person"
-
-        self.vision = VisionClient(vision_url, timeout=0.7)
+        self.vision = VisionClient(self.vision_url, timeout=0.7)
         self.tracker = ObjectTracker(target_object)
         self.follow = FollowManager()
         self.behavior = BehaviorManager()
         self.search = SearchBehavior()
 
-        self.get_logger().info("Qwen Robot mission follower started")
-        self.get_logger().info(f"Vision URL: {vision_url}")
+        self.get_logger().info("Qwen Robot Dashboard Pro mission follower started")
+        self.get_logger().info(f"Vision URL: {self.vision_url}")
         self.get_logger().info(f"Mission: {self.mission.status_text()}")
         self.get_logger().info(f"Target object: {target_object}")
-        self.get_logger().info("Camera topic: /image_raw")
-        self.get_logger().info("LiDAR topic: /scan")
 
         self.timer = self.create_timer(0.5, self.update)
+        self.status_timer = self.create_timer(0.25, self.publish_status)
+
+    def mission_callback(self, msg):
+        mission = msg.data.strip().upper()
+
+        self.mission.set_mission(mission)
+        target = self.mission.get_target_object()
+
+        if target is not None:
+            self.tracker.set_target(target)
+
+        self.search.reset()
+
+        stop = Twist()
+        self.cmd_pub.publish(stop)
+
+        self.get_logger().info(
+            f"Mission changed to {self.mission.status_text()} target={target}"
+        )
 
     def image_callback(self, msg):
         try:
@@ -105,10 +128,7 @@ class QwenRobotNode(Node):
                 if msg.range_min <= distance <= msg.range_max:
                     front_ranges.append(distance)
 
-        if front_ranges:
-            self.front_distance = min(front_ranges)
-        else:
-            self.front_distance = None
+        self.front_distance = min(front_ranges) if front_ranges else None
 
     def update(self):
         self.loop_count += 1
@@ -116,22 +136,18 @@ class QwenRobotNode(Node):
         if not self.mission.should_move():
             stop = Twist()
             self.cmd_pub.publish(stop)
-            self.get_logger().info(
-                f"LOOP {self.loop_count} | MISSION=IDLE | robot stopped"
-            )
+            self.last_cmd = stop
+            self.last_state = "IDLE"
+            self.last_target_label = "none"
             return
 
         if self.latest_frame is None:
-            self.get_logger().info(
-                f"LOOP {self.loop_count} | NO_CAMERA_FRAME | frames={self.frame_count}"
-            )
+            self.last_state = "NO_CAMERA_FRAME"
             return
 
         start = time.time()
-
         detections = self.vision.get_detections_from_frame(self.latest_frame)
-
-        elapsed = time.time() - start
+        self.last_vision_time = time.time() - start
 
         target = self.tracker.select_target(detections)
 
@@ -140,7 +156,11 @@ class QwenRobotNode(Node):
             front_distance=self.front_distance,
         )
 
-        if target is None and self.mission.status_text() in ("FIND_BACKPACK", "FOLLOW_PERSON", "FOLLOW"):
+        if target is None and self.mission.status_text() in (
+            "FIND_BACKPACK",
+            "FOLLOW_PERSON",
+            "FOLLOW",
+        ):
             cmd, motion_state = self.search.update(
                 cmd,
                 front_distance=self.front_distance,
@@ -156,6 +176,9 @@ class QwenRobotNode(Node):
         )
 
         self.cmd_pub.publish(cmd)
+        self.last_cmd = cmd
+        self.last_state = state
+        self.last_target_label = target["label"] if target else "none"
 
         lidar_text = (
             f"{self.front_distance:.2f}m"
@@ -171,7 +194,9 @@ class QwenRobotNode(Node):
                 f"STATE={state} | "
                 f"seen={labels} | "
                 f"front={lidar_text} | "
-                f"vision_time={elapsed:.2f}s"
+                f"vx={cmd.linear.x:.2f} | "
+                f"wz={cmd.angular.z:.2f} | "
+                f"vision_time={self.last_vision_time:.2f}s"
             )
             return
 
@@ -186,13 +211,29 @@ class QwenRobotNode(Node):
             f"front={lidar_text} | "
             f"vx={cmd.linear.x:.2f} | "
             f"wz={cmd.angular.z:.2f} | "
-            f"vision_time={elapsed:.2f}s"
+            f"vision_time={self.last_vision_time:.2f}s"
         )
+
+    def publish_status(self):
+        status = {
+            "mission": self.mission.status_text(),
+            "state": self.last_state,
+            "target": self.last_target_label,
+            "front_distance": self.front_distance,
+            "linear_x": self.last_cmd.linear.x,
+            "angular_z": self.last_cmd.angular.z,
+            "frames": self.frame_count,
+            "loops": self.loop_count,
+            "vision_time": self.last_vision_time,
+        }
+
+        msg = String()
+        msg.data = json.dumps(status)
+        self.status_pub.publish(msg)
 
 
 def main(args=None):
     rclpy.init(args=args)
-
     node = QwenRobotNode()
 
     try:
@@ -200,11 +241,18 @@ def main(args=None):
     except KeyboardInterrupt:
         pass
 
-    stop = Twist()
-    node.cmd_pub.publish(stop)
+    try:
+        stop = Twist()
+        node.cmd_pub.publish(stop)
+    except Exception:
+        pass
 
     node.destroy_node()
-    rclpy.shutdown()
+
+    try:
+        rclpy.shutdown()
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":

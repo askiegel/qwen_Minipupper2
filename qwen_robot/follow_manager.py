@@ -61,7 +61,7 @@ class FollowManager:
         area = target["area"]
 
         center = self.image_width / 2.0
-        error = cx - center
+        error = center - cx
 
         derivative = error - self.prev_error
         self.integral += error
