@@ -12,6 +12,7 @@ from cv_bridge import CvBridge
 from .vision_client import VisionClient
 from .object_tracker import ObjectTracker
 from .follow_manager import FollowManager
+from .behavior_manager import BehaviorManager
 
 
 class QwenRobotNode(Node):
@@ -54,6 +55,7 @@ class QwenRobotNode(Node):
         self.vision = VisionClient(vision_url, timeout=0.7)
         self.tracker = ObjectTracker(target_object)
         self.follow = FollowManager()
+        self.behavior = BehaviorManager()
 
         self.get_logger().info("Qwen Robot visual follower with LiDAR safety started")
         self.get_logger().info(f"Vision URL: {vision_url}")
@@ -111,9 +113,15 @@ class QwenRobotNode(Node):
 
         target = self.tracker.select_target(detections)
 
-        cmd, state = self.follow.compute_cmd(
+        cmd, motion_state = self.follow.compute_cmd(
             target,
             front_distance=self.front_distance,
+        )
+
+        state = self.behavior.update(
+            target,
+            self.front_distance,
+            motion_state,
         )
 
         self.cmd_pub.publish(cmd)
