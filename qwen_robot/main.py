@@ -13,6 +13,8 @@ from .vision_client import VisionClient
 from .object_tracker import ObjectTracker
 from .follow_manager import FollowManager
 from .behavior_manager import BehaviorManager
+from .mission_manager import MissionManager
+from .search_behavior import SearchBehavior
 
 
 class QwenRobotNode(Node):
@@ -25,7 +27,6 @@ class QwenRobotNode(Node):
         self.latest_frame = None
         self.frame_count = 0
         self.loop_count = 0
-
         self.front_distance = None
 
         self.image_sub = self.create_subscription(
@@ -47,22 +48,35 @@ class QwenRobotNode(Node):
             "http://192.168.68.100:8000/detect",
         )
 
-        target_object = os.getenv(
-            "TARGET_OBJECT",
-            "backpack",
+        mission_name = os.getenv(
+            "MISSION",
+            "FOLLOW_PERSON",
         )
+
+        target_override = os.getenv(
+            "TARGET_OBJECT",
+            "",
+        )
+
+        self.mission = MissionManager(mission_name)
+
+        if target_override:
+            target_object = target_override
+        else:
+            target_object = self.mission.get_target_object() or "person"
 
         self.vision = VisionClient(vision_url, timeout=0.7)
         self.tracker = ObjectTracker(target_object)
         self.follow = FollowManager()
         self.behavior = BehaviorManager()
+        self.search = SearchBehavior()
 
-        self.get_logger().info("Qwen Robot visual follower with LiDAR safety started")
+        self.get_logger().info("Qwen Robot mission follower started")
         self.get_logger().info(f"Vision URL: {vision_url}")
+        self.get_logger().info(f"Mission: {self.mission.status_text()}")
         self.get_logger().info(f"Target object: {target_object}")
         self.get_logger().info("Camera topic: /image_raw")
         self.get_logger().info("LiDAR topic: /scan")
-        self.get_logger().info("Front LiDAR safety sector: +/- 20 degrees")
 
         self.timer = self.create_timer(0.5, self.update)
 
@@ -99,6 +113,14 @@ class QwenRobotNode(Node):
     def update(self):
         self.loop_count += 1
 
+        if not self.mission.should_move():
+            stop = Twist()
+            self.cmd_pub.publish(stop)
+            self.get_logger().info(
+                f"LOOP {self.loop_count} | MISSION=IDLE | robot stopped"
+            )
+            return
+
         if self.latest_frame is None:
             self.get_logger().info(
                 f"LOOP {self.loop_count} | NO_CAMERA_FRAME | frames={self.frame_count}"
@@ -118,7 +140,16 @@ class QwenRobotNode(Node):
             front_distance=self.front_distance,
         )
 
+        if target is None and self.mission.status_text() in ("FIND_BACKPACK", "FOLLOW_PERSON", "FOLLOW"):
+            cmd, motion_state = self.search.update(
+                cmd,
+                front_distance=self.front_distance,
+            )
+        else:
+            self.search.reset()
+
         state = self.behavior.update(
+            self.mission.status_text(),
             target,
             self.front_distance,
             motion_state,
@@ -135,8 +166,9 @@ class QwenRobotNode(Node):
         if target is None:
             labels = [d.get("label") for d in detections if d.get("label")]
             self.get_logger().info(
-                f"LOOP {self.loop_count} | {state} | "
-                f"frames={self.frame_count} | "
+                f"LOOP {self.loop_count} | "
+                f"MISSION={self.mission.status_text()} | "
+                f"STATE={state} | "
                 f"seen={labels} | "
                 f"front={lidar_text} | "
                 f"vision_time={elapsed:.2f}s"
@@ -145,7 +177,8 @@ class QwenRobotNode(Node):
 
         self.get_logger().info(
             f"LOOP {self.loop_count} | "
-            f"{state} | "
+            f"MISSION={self.mission.status_text()} | "
+            f"STATE={state} | "
             f"{target['label']} | "
             f"conf={target['confidence']:.2f} | "
             f"cx={target['cx']:.1f} | "

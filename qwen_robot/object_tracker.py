@@ -3,19 +3,35 @@ class ObjectTracker:
         self.target_label = target_label
 
         self.aliases = {
-            "backpack": ["backpack", "suitcase", "handbag"],
-            "bag": ["backpack", "suitcase", "handbag"],
+            "backpack": [
+                "backpack",
+                "suitcase",
+                "handbag",
+                "sports ball",
+                "umbrella",
+            ],
+            "bag": [
+                "backpack",
+                "suitcase",
+                "handbag",
+                "umbrella",
+            ],
             "person": ["person"],
             "chair": ["chair"],
             "bottle": ["bottle"],
             "laptop": ["laptop"],
         }
 
+        self.min_confidence = {
+            "backpack": 0.35,
+            "bag": 0.35,
+            "person": 0.45,
+        }
+
         self.last_target = None
         self.locked = False
         self.missed_frames = 0
-        self.max_missed_frames = 8
-
+        self.max_missed_frames = 12
         self.target_id = 0
 
     def set_target(self, label):
@@ -37,6 +53,11 @@ class ObjectTracker:
 
         confidence = float(det.get("confidence", det.get("score", 0.0)))
 
+        required_conf = self.min_confidence.get(self.target_label, 0.40)
+
+        if confidence < required_conf:
+            return None
+
         x1 = det.get("x1")
         y1 = det.get("y1")
         x2 = det.get("x2")
@@ -51,10 +72,11 @@ class ObjectTracker:
 
         width = float(x2) - float(x1)
         height = float(y2) - float(y1)
-        area = width * height
 
         if width <= 0 or height <= 0:
             return None
+
+        area = width * height
 
         return {
             "id": self.target_id,
@@ -73,7 +95,7 @@ class ObjectTracker:
 
     def score_candidate(self, candidate):
         if self.last_target is None:
-            return candidate["confidence"] * 1000.0 + candidate["area"] * 0.001
+            return candidate["confidence"] * 1000.0 + candidate["area"] * 0.002
 
         dx = candidate["cx"] - self.last_target["cx"]
         dy = candidate["cy"] - self.last_target["cy"]
@@ -84,8 +106,9 @@ class ObjectTracker:
 
         return (
             candidate["confidence"] * 1000.0
-            - distance_penalty * 2.0
-            - area_penalty * 100.0
+            + candidate["area"] * 0.001
+            - distance_penalty * 1.5
+            - area_penalty * 80.0
         )
 
     def select_target(self, detections):
@@ -101,9 +124,6 @@ class ObjectTracker:
 
             if self.locked and self.last_target is not None:
                 if self.missed_frames <= self.max_missed_frames:
-                    ghost = dict(self.last_target)
-                    ghost["confidence"] = 0.0
-                    ghost["lost"] = True
                     return None
 
             self.locked = False

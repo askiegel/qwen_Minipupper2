@@ -4,15 +4,20 @@ class BehaviorManager:
         self.last_state = None
         self.state_counter = 0
 
-    def update(self, target, front_distance, motion_state):
+    def update(self, mission, target, front_distance, motion_state):
         self.last_state = self.state
+
+        mission = mission.upper()
 
         obstacle_close = (
             front_distance is not None
             and front_distance < 0.28
         )
 
-        if obstacle_close:
+        if mission == "IDLE":
+            self.state = "IDLE"
+
+        elif obstacle_close:
             self.state = "AVOIDING_OBSTACLE"
 
         elif motion_state == "ARRIVED":
@@ -21,11 +26,11 @@ class BehaviorManager:
         elif target is not None:
             self.state = "FOLLOWING"
 
-        elif motion_state == "SEARCHING":
+        elif mission in ("FIND_BACKPACK", "FOLLOW_PERSON", "FOLLOW"):
             self.state = "SEARCHING"
 
         else:
-            self.state = "IDLE"
+            self.state = "SEARCHING"
 
         if self.state == self.last_state:
             self.state_counter += 1
@@ -35,4 +40,4 @@ class BehaviorManager:
         return self.state
 
     def status_text(self):
-        return f"{self.state}"
+        return self.state
