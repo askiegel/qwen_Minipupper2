@@ -5,15 +5,12 @@ class FollowManager:
     def __init__(self):
         self.image_width = 640.0
 
-        # Distance behavior based on bounding-box area
         self.stop_area = 90000.0
         self.slow_area = 60000.0
 
-        # Forward speed limits
         self.max_forward = 0.12
         self.min_forward = 0.03
 
-        # PID steering gains
         self.kp = 0.0016
         self.ki = 0.0
         self.kd = 0.0008
@@ -27,11 +24,25 @@ class FollowManager:
         self.lost_count = 0
         self.max_lost_count = 6
 
+        # LiDAR safety
+        self.front_stop_distance = 0.28
+        self.front_slow_distance = 0.45
+
     def clamp(self, value, low, high):
         return max(low, min(high, value))
 
-    def compute_cmd(self, target):
+    def compute_cmd(self, target, front_distance=None):
         cmd = Twist()
+
+        obstacle_close = (
+            front_distance is not None
+            and front_distance < self.front_stop_distance
+        )
+
+        obstacle_near = (
+            front_distance is not None
+            and front_distance < self.front_slow_distance
+        )
 
         if target is None:
             self.lost_count += 1
@@ -54,7 +65,6 @@ class FollowManager:
 
         derivative = error - self.prev_error
         self.integral += error
-
         self.integral = self.clamp(self.integral, -10000.0, 10000.0)
 
         turn = (
@@ -64,7 +74,6 @@ class FollowManager:
         )
 
         turn = self.clamp(turn, -self.max_turn, self.max_turn)
-
         cmd.angular.z = turn
 
         if abs(turn) > 0.02:
@@ -77,6 +86,14 @@ class FollowManager:
             cmd.angular.z = 0.0
             return cmd, "ARRIVED"
 
+        if obstacle_close:
+            cmd.linear.x = 0.0
+
+            if abs(cmd.angular.z) < 0.12:
+                cmd.angular.z = self.last_turn_direction * 0.18
+
+            return cmd, "OBSTACLE_STOP"
+
         if area >= self.slow_area:
             base_speed = self.min_forward
         else:
@@ -84,6 +101,9 @@ class FollowManager:
 
         turn_slowdown = 1.0 - min(abs(turn) / self.max_turn, 1.0)
         speed = base_speed * (0.35 + 0.65 * turn_slowdown)
+
+        if obstacle_near:
+            speed = min(speed, self.min_forward)
 
         cmd.linear.x = self.clamp(speed, self.min_forward, self.max_forward)
 
