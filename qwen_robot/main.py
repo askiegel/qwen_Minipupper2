@@ -227,6 +227,24 @@ class QwenRobotNode(Node):
             "vision_time": self.last_vision_time,
         }
 
+        # v0.7 Target Manager / ReID telemetry
+        try:
+            status.update(self.tracker.telemetry())
+        except Exception as e:
+            status.update({
+                "target_state": "UNKNOWN",
+                "target_id": None,
+                "target_label": self.last_target_label,
+                "target_confidence": 0.0,
+                "target_similarity": 0.0,
+                "target_cx": None,
+                "target_cy": None,
+                "target_area": None,
+                "target_lost_time": 0.0,
+                "target_last_seen_age": 999.0,
+                "target_telemetry_error": str(e),
+            })
+
         msg = String()
         msg.data = json.dumps(status)
         self.status_pub.publish(msg)

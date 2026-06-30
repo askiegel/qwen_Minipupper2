@@ -1,3 +1,6 @@
+from qwen_robot.target_manager import TargetManager
+
+
 class ObjectTracker:
     def __init__(self, target_label="backpack"):
         self.target_label = target_label
@@ -34,12 +37,24 @@ class ObjectTracker:
         self.max_missed_frames = 12
         self.target_id = 0
 
+        # v0.7 lightweight Person ReID layer
+        self.person_target_manager = TargetManager(
+            target_label="person",
+            lock_threshold=0.45,
+            reacquire_threshold=0.35,
+            lost_timeout=4.0,
+            smoothing=0.25,
+        )
+
     def set_target(self, label):
         self.target_label = label
         self.last_target = None
         self.locked = False
         self.missed_frames = 0
         self.target_id += 1
+
+        if label == "person":
+            self.person_target_manager.reset()
 
     def label_matches(self, label):
         allowed = self.aliases.get(self.target_label, [self.target_label])
@@ -51,7 +66,7 @@ class ObjectTracker:
         if not self.label_matches(label):
             return None
 
-        confidence = float(det.get("confidence", det.get("score", 0.0)))
+        confidence = float(det.get("confidence", det.get("score", det.get("conf", 0.0))))
 
         required_conf = self.min_confidence.get(self.target_label, 0.40)
 
@@ -86,6 +101,7 @@ class ObjectTracker:
             "y1": float(y1),
             "x2": float(x2),
             "y2": float(y2),
+            "bbox": [float(x1), float(y1), float(x2), float(y2)],
             "cx": (float(x1) + float(x2)) / 2.0,
             "cy": (float(y1) + float(y2)) / 2.0,
             "width": width,
@@ -119,6 +135,20 @@ class ObjectTracker:
             if normalized is not None:
                 candidates.append(normalized)
 
+        # v0.7: person tracking now uses TargetManager identity lock/reacquisition
+        if self.target_label == "person":
+            selected = self.person_target_manager.update(candidates)
+
+            if selected is None:
+                self.missed_frames += 1
+                return None
+
+            self.last_target = selected
+            self.locked = True
+            self.missed_frames = 0
+            return selected
+
+        # Existing object behavior remains unchanged for backpack, bag, etc.
         if not candidates:
             self.missed_frames += 1
 
@@ -147,3 +177,23 @@ class ObjectTracker:
         self.missed_frames = 0
 
         return selected
+
+    def telemetry(self):
+        if self.target_label == "person":
+            return self.person_target_manager.telemetry()
+
+        return {
+            "target_state": "LOCKED" if self.locked else "UNLOCKED",
+            "target_id": self.target_id if self.locked else None,
+            "target_label": self.target_label,
+            "target_confidence": (
+                round(float(self.last_target.get("confidence", 0.0)), 3)
+                if self.last_target else 0.0
+            ),
+            "target_similarity": 1.0 if self.locked else 0.0,
+            "target_cx": self.last_target.get("cx") if self.last_target else None,
+            "target_cy": self.last_target.get("cy") if self.last_target else None,
+            "target_area": self.last_target.get("area") if self.last_target else None,
+            "target_lost_time": 0.0,
+            "target_last_seen_age": 0.0,
+        }
