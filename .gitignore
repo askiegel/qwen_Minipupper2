@@ -22,3 +22,8 @@ venv/
 .idea/
 *.swp
 *.swo
+
+# Local backups and diagnostics
+*.bak
+diagnostics/
+__pycache__/
