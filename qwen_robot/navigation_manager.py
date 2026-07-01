@@ -124,15 +124,18 @@ class NavigationManager:
         )
 
         if self.state == NavigationState.IDLE:
+            self.state = NavigationState.SEARCHING
+            self._search_start_time = now
+
             return self._set_telemetry(
-                action=NavigationAction.NONE,
+                action=NavigationAction.SEARCH_ROTATE,
                 target_visible=False,
                 target_id=self.active_target_id,
                 last_seen_age_s=last_seen_age_s,
                 last_seen_range_m=last_seen_range_m,
                 last_seen_bearing_deg=last_seen_bearing_deg,
-                confidence=0.0,
-                status="idle; no active target",
+                confidence=0.2,
+                status="active mission; searching for first target lock",
             )
 
         if has_recent_memory and last_seen_range_m is not None:
@@ -190,6 +193,19 @@ class NavigationManager:
                 last_seen_age_s=last_seen_age_s,
                 confidence=0.2,
                 status="brief target loss; waiting",
+            )
+
+        if self.active_target_id is None:
+            self.state = NavigationState.SEARCHING
+            return self._set_telemetry(
+                action=NavigationAction.SEARCH_ROTATE,
+                target_visible=False,
+                target_id=self.active_target_id,
+                last_seen_age_s=last_seen_age_s,
+                last_seen_range_m=last_seen_range_m,
+                last_seen_bearing_deg=last_seen_bearing_deg,
+                confidence=0.2,
+                status="active mission; still searching for first target lock",
             )
 
         self.state = NavigationState.FAILED

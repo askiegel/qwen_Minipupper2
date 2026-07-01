@@ -47,6 +47,11 @@ class QwenRobotNode(Node):
         self.last_vision_time = 0.0
         self.last_navigation = {}
 
+        # Last-seen navigation memory, camera/LiDAR-relative for now.
+        self.last_seen_range_m = None
+        self.last_seen_bearing_deg = None
+        self.last_seen_time = None
+
         self.image_sub = self.create_subscription(
             Image,
             "/image_raw",
@@ -154,21 +159,33 @@ class QwenRobotNode(Node):
 
         target_visible = target is not None
         target_id = tracker_tel.get("target_id")
-        last_seen_age = tracker_tel.get("target_last_seen_age")
-
-        target_range = self.front_distance if target_visible else None
-        target_bearing = self.estimate_bearing_deg(target)
 
         confidence = 0.0
-        if target is not None:
+        target_bearing = None
+
+        if target_visible:
+            target_bearing = self.estimate_bearing_deg(target)
             confidence = float(target.get("confidence", target.get("conf", 0.0)))
+
+            if self.front_distance is not None:
+                self.last_seen_range_m = self.front_distance
+
+            self.last_seen_bearing_deg = target_bearing
+            self.last_seen_time = time.time()
+
+            last_seen_age = 0.0
+        else:
+            if self.last_seen_time is not None:
+                last_seen_age = time.time() - self.last_seen_time
+            else:
+                last_seen_age = tracker_tel.get("target_last_seen_age", 999.0)
 
         self.last_navigation = self.navigation.update(
             target_visible=target_visible,
             target_id=str(target_id) if target_id is not None else None,
             last_seen_age_s=last_seen_age,
-            last_seen_range_m=target_range,
-            last_seen_bearing_deg=target_bearing,
+            last_seen_range_m=self.last_seen_range_m,
+            last_seen_bearing_deg=self.last_seen_bearing_deg,
             confidence=confidence,
         )
 
