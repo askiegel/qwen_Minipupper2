@@ -1,76 +1,93 @@
-from collections import deque
-from datetime import datetime
+#!/usr/bin/env python3
+
+"""
+Memory Manager
+v0.8 Alpha
+
+Stores the latest TargetSnapshot and a history of observations.
+"""
+
+import copy
+import time
+
+from .target_bus import target_bus
+from .target_snapshot import TargetSnapshot
 
 
-class RobotMemory:
-    def __init__(self, max_observations=100):
-        self.observations = deque(maxlen=max_observations)
+class MemoryManager:
 
-    def add_vision_observation(self, vision_result):
-        observation = {
-            "time": datetime.now().isoformat(timespec="seconds"),
-            "objects": vision_result.get("objects", []),
-            "description": vision_result.get("description", "No description.")
-        }
+    def __init__(self):
 
-        self.observations.appendleft(observation)
-        return observation
+        self.current = TargetSnapshot.empty()
+
+        self.history = []
+
+        self.max_history = 500
+
+        target_bus.subscribe(self.on_snapshot)
+
+    def on_snapshot(self, snapshot: TargetSnapshot):
+
+        self.current = snapshot
+
+        self.history.append(copy.deepcopy(snapshot))
+
+        if len(self.history) > self.max_history:
+            self.history.pop(0)
 
     def latest(self):
-        if not self.observations:
-            return None
-        return self.observations[0]
 
-    def count(self):
-        return len(self.observations)
+        return self.current
 
-    def summary(self):
-        if not self.observations:
-            return {
-                "count": 0,
-                "latest": "No observations yet.",
-                "recent_objects": []
-            }
+    def has_recent_target(self, timeout=10.0):
 
-        recent_objects = []
+        if not self.current.visible:
 
-        for obs in list(self.observations)[:10]:
-            for obj in obs.get("objects", []):
-                if obj not in recent_objects:
-                    recent_objects.append(obj)
+            if self.current.last_seen_age_s is None:
+                return False
 
-        return {
-            "count": len(self.observations),
-            "latest": self.observations[0],
-            "recent_objects": recent_objects
-        }
+            return self.current.last_seen_age_s < timeout
 
-    def compare_latest_two(self):
-        if len(self.observations) < 2:
-            return {
-                "changed": False,
-                "message": "Not enough observations to compare."
-            }
+        return True
 
-        newest = set(self.observations[0].get("objects", []))
-        previous = set(self.observations[1].get("objects", []))
+    def last_seen(self):
 
-        added = sorted(list(newest - previous))
-        removed = sorted(list(previous - newest))
+        return self.current
 
-        if not added and not removed:
-            message = "I do not notice any object changes."
-        else:
-            parts = []
-            if added:
-                parts.append("New objects: " + ", ".join(added))
-            if removed:
-                parts.append("Missing objects: " + ", ".join(removed))
-            message = ". ".join(parts) + "."
+    def history_count(self):
+
+        return len(self.history)
+
+    def clear(self):
+
+        self.current = TargetSnapshot.empty()
+
+        self.history.clear()
+
+    def diagnostics(self):
 
         return {
-            "changed": bool(added or removed),
-            "added": added,
-            "removed": removed,
-            "message": message
+
+            "history_size": len(self.history),
+
+            "visible": self.current.visible,
+
+            "label": self.current.label,
+
+            "target_id": self.current.target_id,
+
+            "seen_count": self.current.seen_count,
+
+            "last_seen_age":
+
+                self.current.last_seen_age_s,
+
+            "updated":
+
+                self.current.updated_at,
+
         }
+
+
+memory_manager = MemoryManager()
+
