@@ -46,15 +46,16 @@ class ObjectTracker:
             smoothing=0.25,
         )
 
-    def set_target(self, label):
-        self.target_label = label
+    def reset(self):
         self.last_target = None
         self.locked = False
         self.missed_frames = 0
-        self.target_id += 1
+        self.person_target_manager.reset()
 
-        if label == "person":
-            self.person_target_manager.reset()
+    def set_target(self, label):
+        self.target_label = label
+        self.reset()
+        self.target_id += 1
 
     def label_matches(self, label):
         allowed = self.aliases.get(self.target_label, [self.target_label])
@@ -127,7 +128,7 @@ class ObjectTracker:
             - area_penalty * 80.0
         )
 
-    def select_target(self, detections):
+    def select_target(self, detections, frame=None):
         candidates = []
 
         for det in detections:
@@ -137,7 +138,7 @@ class ObjectTracker:
 
         # v0.7: person tracking now uses TargetManager identity lock/reacquisition
         if self.target_label == "person":
-            selected = self.person_target_manager.update(candidates)
+            selected = self.person_target_manager.update(candidates, frame=frame)
 
             if selected is None:
                 self.missed_frames += 1

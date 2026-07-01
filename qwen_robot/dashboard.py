@@ -2,6 +2,8 @@ import os
 import time
 import json
 import threading
+from pathlib import Path
+from datetime import datetime
 
 import cv2
 import rclpy
@@ -17,6 +19,7 @@ from cv_bridge import CvBridge
 app = Flask(__name__)
 
 latest_jpeg = None
+latest_target_jpeg = None
 latest_status = {
     "mission": "UNKNOWN",
     "state": "UNKNOWN",
@@ -197,6 +200,75 @@ class DashboardNode(Node):
 
         return frame
 
+    def update_target_crop(self, frame, detections):
+        global latest_target_jpeg
+
+        with status_lock:
+            status = dict(latest_status)
+
+        target_label = status.get("target", "none")
+        target_cx = status.get("target_cx", None)
+        target_cy = status.get("target_cy", None)
+
+        if target_label in (None, "none"):
+            return
+
+        best = None
+        best_score = -1.0
+
+        for det in detections:
+            label = det.get("label", "object")
+            if label != target_label:
+                continue
+
+            x1 = det.get("x1")
+            y1 = det.get("y1")
+            x2 = det.get("x2")
+            y2 = det.get("y2")
+
+            if None in (x1, y1, x2, y2):
+                continue
+
+            cx = (float(x1) + float(x2)) / 2.0
+            cy = (float(y1) + float(y2)) / 2.0
+
+            if target_cx is not None and target_cy is not None:
+                dx = cx - float(target_cx)
+                dy = cy - float(target_cy)
+                score = -((dx * dx + dy * dy) ** 0.5)
+            else:
+                score = float(det.get("confidence", 0.0))
+
+            if score > best_score:
+                best = det
+                best_score = score
+
+        if best is None:
+            return
+
+        h, w = frame.shape[:2]
+
+        x1 = int(max(0, min(w - 1, best.get("x1"))))
+        y1 = int(max(0, min(h - 1, best.get("y1"))))
+        x2 = int(max(0, min(w - 1, best.get("x2"))))
+        y2 = int(max(0, min(h - 1, best.get("y2"))))
+
+        if x2 <= x1 or y2 <= y1:
+            return
+
+        crop = frame[y1:y2, x1:x2]
+
+        if crop.size == 0:
+            return
+
+        crop = cv2.resize(crop, (240, 240), interpolation=cv2.INTER_AREA)
+
+        ok, jpeg = cv2.imencode(".jpg", crop)
+
+        if ok:
+            with frame_lock:
+                latest_target_jpeg = jpeg.tobytes()
+
     def image_callback(self, msg):
         global latest_jpeg
 
@@ -211,6 +283,7 @@ class DashboardNode(Node):
                 self.latest_detections = self.call_vision_server(frame)
                 self.last_detect_time = now
 
+            self.update_target_crop(frame, self.latest_detections)
             frame = self.draw_boxes(frame, self.latest_detections)
 
             ok, jpeg = cv2.imencode(".jpg", frame)
@@ -290,6 +363,25 @@ button {
 .follow { background: #2d8cff; color: white; }
 .backpack { background: #16a34a; color: white; }
 .stop { background: #dc2626; color: white; }
+.dev { background: #9333ea; color: white; }
+.devpanel {
+    display: none;
+    margin-top: 12px;
+    border: 1px solid #555;
+}
+.smallvalue {
+    font-size: 16px;
+    font-weight: bold;
+}
+.ok { color: #22c55e; }
+.warn { color: #facc15; }
+.bad { color: #ef4444; }
+.crop {
+    width: 100%;
+    border: 2px solid #555;
+    border-radius: 8px;
+    margin-top: 8px;
+}
 </style>
 </head>
 <body>
@@ -309,13 +401,64 @@ button {
         <div class="card"><div class="label">ANGULAR Z</div><div id="wz" class="value">---</div></div>
         <div class="card"><div class="label">VISION LATENCY</div><div id="latency" class="value">---</div></div>
 
+        <div class="card"><div class="label">TARGET STATE</div><div id="target_state" class="value">---</div></div>
+        <div class="card"><div class="label">TARGET ID</div><div id="target_id" class="value">---</div></div>
+        <div class="card"><div class="label">SIMILARITY</div><div id="target_similarity" class="value">---</div></div>
+        <div class="card"><div class="label">TARGET CONF</div><div id="target_confidence" class="value">---</div></div>
+        <div class="card"><div class="label">APPEARANCE</div><div id="target_appearance_score" class="value">---</div></div>
+        <div class="card"><div class="label">LOCATION</div><div id="target_location_score" class="value">---</div></div>
+        <div class="card"><div class="label">SIZE</div><div id="target_size_score" class="value">---</div></div>
+        <div class="card"><div class="label">HAS APPEARANCE</div><div id="target_has_appearance" class="value">---</div></div>
+        <div class="card"><div class="label">LOST TIME</div><div id="target_lost_time" class="value">---</div></div>
+        <div class="card"><div class="label">LAST SEEN</div><div id="target_last_seen_age" class="value">---</div></div>
+
         <button class="idle" onclick="sendMission('IDLE')">Idle / Stop</button>
         <button class="follow" onclick="sendMission('FOLLOW_PERSON')">Follow Person</button>
         <button class="backpack" onclick="sendMission('FIND_BACKPACK')">Find Backpack</button>
+        <button class="dev" onclick="toggleDeveloperMode()">Developer Mode</button>
+        <button class="dev" onclick="saveDiagnostics()">Save Diagnostics</button>
+
+        <div id="developer_panel" class="devpanel">
+            <div class="card">
+                <div class="label">CURRENT TARGET CROP</div>
+                <img class="crop" src="/target_crop">
+            </div>
+            <div class="card"><div class="label">BUILD</div><div id="dev_build" class="smallvalue">---</div></div>
+            <div class="card"><div class="label">SYSTEM</div><div id="dev_system" class="smallvalue">---</div></div>
+            <div class="card"><div class="label">ROS STATUS</div><div id="dev_ros" class="smallvalue">---</div></div>
+            <div class="card"><div class="label">CAMERA FRAMES</div><div id="dev_frames" class="smallvalue">---</div></div>
+            <div class="card"><div class="label">CONTROL LOOPS</div><div id="dev_loops" class="smallvalue">---</div></div>
+            <div class="card"><div class="label">VISION FPS EST</div><div id="dev_fps" class="smallvalue">---</div></div>
+            <div class="card"><div class="label">VISION HEALTH</div><div id="dev_vision" class="smallvalue">---</div></div>
+            <div class="card"><div class="label">LIDAR HEALTH</div><div id="dev_lidar" class="smallvalue">---</div></div>
+            <div class="card"><div class="label">TARGET CENTER</div><div id="dev_center" class="smallvalue">---</div></div>
+            <div class="card"><div class="label">TARGET AREA</div><div id="dev_area" class="smallvalue">---</div></div>
+            <div class="card"><div class="label">REID BREAKDOWN</div><div id="dev_reid" class="smallvalue">---</div></div>
+            <div class="card">
+                <div class="label">KNOWN TARGETS</div>
+                <div id="dev_memory" class="smallvalue">---</div>
+            </div>
+        </div>
     </div>
 </div>
 
 <script>
+let developerMode = false;
+let lastFrames = 0;
+let lastFrameTime = Date.now();
+
+function toggleDeveloperMode() {
+    developerMode = !developerMode;
+    document.getElementById('developer_panel').style.display =
+        developerMode ? 'block' : 'none';
+}
+
+function healthClass(value) {
+    if (value === 'OK') return 'ok';
+    if (value === 'WARN') return 'warn';
+    return 'bad';
+}
+
 async function refreshStatus() {
     const r = await fetch('/status');
     const s = await r.json();
@@ -335,6 +478,120 @@ async function refreshStatus() {
 
     document.getElementById('latency').innerText =
         s.vision_time == null ? '---' : Math.round(s.vision_time * 1000) + ' ms';
+
+    document.getElementById('target_state').innerText =
+        s.target_state ?? '---';
+
+    document.getElementById('target_id').innerText =
+        s.target_id == null ? '---' : s.target_id;
+
+    document.getElementById('target_similarity').innerText =
+        s.target_similarity == null ? '---' : s.target_similarity.toFixed(3);
+
+    document.getElementById('target_confidence').innerText =
+        s.target_confidence == null ? '---' : s.target_confidence.toFixed(3);
+
+    document.getElementById('target_appearance_score').innerText =
+        s.target_appearance_score == null ? '---' : s.target_appearance_score.toFixed(3);
+
+    document.getElementById('target_location_score').innerText =
+        s.target_location_score == null ? '---' : s.target_location_score.toFixed(3);
+
+    document.getElementById('target_size_score').innerText =
+        s.target_size_score == null ? '---' : s.target_size_score.toFixed(3);
+
+    document.getElementById('target_has_appearance').innerText =
+        s.target_has_appearance == null ? '---' : (s.target_has_appearance ? 'YES' : 'NO');
+
+    document.getElementById('target_lost_time').innerText =
+        s.target_lost_time == null ? '---' : s.target_lost_time.toFixed(2) + ' s';
+
+    document.getElementById('target_last_seen_age').innerText =
+        s.target_last_seen_age == null ? '---' : s.target_last_seen_age.toFixed(2) + ' s';
+
+    const now = Date.now();
+    const frames = s.frames ?? 0;
+    const dt = (now - lastFrameTime) / 1000.0;
+    const df = frames - lastFrames;
+    const fps = dt > 0 ? df / dt : 0.0;
+
+    if (dt >= 1.0) {
+        lastFrames = frames;
+        lastFrameTime = now;
+    }
+
+    const rosHealth = s.mission === 'UNKNOWN' ? 'BAD' : 'OK';
+    const visionHealth = s.vision_time == null || s.vision_time <= 0.0
+        ? 'BAD'
+        : (s.vision_time < 0.35 ? 'OK' : 'WARN');
+
+    const lidarHealth = s.front_distance == null
+        ? 'WARN'
+        : 'OK';
+
+    document.getElementById('dev_build').innerText =
+        'branch=' + (s.git_branch ?? 'unknown') +
+        ' commit=' + (s.git_commit ?? 'unknown');
+
+    document.getElementById('dev_system').innerText =
+        'load=' + (s.load_avg_1m == null ? '---' : s.load_avg_1m.toFixed(2)) +
+        ' mem=' + (s.mem_percent == null ? '---' : s.mem_percent.toFixed(1) + '%') +
+        ' temp=' + (s.cpu_temp_c == null ? '---' : s.cpu_temp_c.toFixed(1) + 'C');
+
+    document.getElementById('dev_ros').innerHTML =
+        '<span class="' + healthClass(rosHealth) + '">' + rosHealth + '</span>';
+
+    document.getElementById('dev_frames').innerText =
+        s.frames == null ? '---' : s.frames;
+
+    document.getElementById('dev_loops').innerText =
+        s.loops == null ? '---' : s.loops;
+
+    document.getElementById('dev_fps').innerText =
+        fps.toFixed(1);
+
+    document.getElementById('dev_vision').innerHTML =
+        '<span class="' + healthClass(visionHealth) + '">' + visionHealth + '</span>'
+        + ' / ' + (s.vision_time == null ? '---' : Math.round(s.vision_time * 1000) + ' ms');
+
+    document.getElementById('dev_lidar').innerHTML =
+        '<span class="' + healthClass(lidarHealth) + '">' + lidarHealth + '</span>'
+        + ' / ' + (s.front_distance == null ? 'None' : s.front_distance.toFixed(2) + ' m');
+
+    document.getElementById('dev_center').innerText =
+        s.target_cx == null || s.target_cy == null
+        ? '---'
+        : '(' + s.target_cx.toFixed(1) + ', ' + s.target_cy.toFixed(1) + ')';
+
+    document.getElementById('dev_area').innerText =
+        s.target_area == null ? '---' : Math.round(s.target_area);
+
+    document.getElementById('dev_reid').innerText =
+        'sim=' + (s.target_similarity == null ? '---' : s.target_similarity.toFixed(3)) +
+        ' app=' + (s.target_appearance_score == null ? '---' : s.target_appearance_score.toFixed(3)) +
+        ' loc=' + (s.target_location_score == null ? '---' : s.target_location_score.toFixed(3)) +
+        ' size=' + (s.target_size_score == null ? '---' : s.target_size_score.toFixed(3));
+
+    const known = s.known_targets ?? [];
+    if (known.length === 0) {
+        document.getElementById('dev_memory').innerText = 'No known targets';
+    } else {
+        document.getElementById('dev_memory').innerHTML = known.map(t => {
+            const age = t.last_seen_age == null ? '---' : t.last_seen_age.toFixed(1) + 's';
+            const conf = t.confidence == null ? '---' : t.confidence.toFixed(2);
+            return '#' + t.id + ' ' + t.label +
+                   ' | seen ' + age +
+                   ' | conf ' + conf +
+                   ' | count ' + t.seen_count;
+        }).join('<br>');
+    }
+
+    document.getElementById('dev_nav').innerHTML =
+        'state=' + (s.nav_state ?? '---') + '<br>' +
+        'last=' + (s.nav_last_target ?? '---') + '<br>' +
+        'age=' + (s.nav_last_seen_age == null ? '---' : s.nav_last_seen_age.toFixed(2) + 's') + '<br>' +
+        'direction=' + (s.nav_last_direction ?? '---') + '<br>' +
+        'cx=' + (s.nav_last_cx == null ? '---' : s.nav_last_cx.toFixed(1));
 }
 
 async function sendMission(mission) {
@@ -344,6 +601,12 @@ async function sendMission(mission) {
         body: JSON.stringify({mission: mission})
     });
     refreshStatus();
+}
+
+async function saveDiagnostics() {
+    const r = await fetch('/save_diagnostics', {method: 'POST'});
+    const result = await r.json();
+    alert(result.ok ? ('Saved: ' + result.path) : ('Save failed: ' + result.error));
 }
 
 setInterval(refreshStatus, 500);
@@ -371,6 +634,40 @@ def mission():
         dashboard_node.publish_mission(mission_name)
 
     return jsonify({"ok": True, "mission": mission_name})
+
+
+@app.route("/target_crop")
+def target_crop():
+    with frame_lock:
+        frame = latest_target_jpeg
+
+    if frame is None:
+        return Response(status=204)
+
+    return Response(
+        frame,
+        mimetype="image/jpeg",
+    )
+
+
+@app.route("/save_diagnostics", methods=["POST"])
+def save_diagnostics():
+    try:
+        with status_lock:
+            snapshot = dict(latest_status)
+
+        out_dir = Path("/home/ubuntu/ros2_ws/src/qwen_robot/diagnostics")
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        path = out_dir / f"diagnostics_{stamp}.json"
+
+        with open(path, "w") as f:
+            json.dump(snapshot, f, indent=2)
+
+        return jsonify({"ok": True, "path": str(path)})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 
 @app.route("/video_feed")
