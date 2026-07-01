@@ -17,6 +17,7 @@ from .follow_manager import FollowManager
 from .behavior_manager import BehaviorManager
 from .mission_manager import MissionManager
 from .search_behavior import SearchBehavior
+from .navigation_manager import NavigationManager
 
 
 class QwenRobotNode(Node):
@@ -34,6 +35,7 @@ class QwenRobotNode(Node):
         )
 
         self.bridge = CvBridge()
+
         self.latest_frame = None
         self.frame_count = 0
         self.loop_count = 0
@@ -43,6 +45,7 @@ class QwenRobotNode(Node):
         self.last_target_label = "none"
         self.last_state = "IDLE"
         self.last_vision_time = 0.0
+        self.last_navigation = {}
 
         self.image_sub = self.create_subscription(
             Image,
@@ -63,12 +66,9 @@ class QwenRobotNode(Node):
             "http://192.168.68.100:8000/detect",
         )
 
-        mission_name = os.getenv(
-            "MISSION",
-            "FOLLOW_PERSON",
-        )
-
+        mission_name = os.getenv("MISSION", "FOLLOW_PERSON")
         self.mission = MissionManager(mission_name)
+
         target_object = self.mission.get_target_object() or "person"
 
         self.vision = VisionClient(self.vision_url, timeout=0.7)
@@ -76,11 +76,13 @@ class QwenRobotNode(Node):
         self.follow = FollowManager()
         self.behavior = BehaviorManager()
         self.search = SearchBehavior()
+        self.navigation = NavigationManager()
 
         self.get_logger().info("Qwen Robot Dashboard Pro mission follower started")
         self.get_logger().info(f"Vision URL: {self.vision_url}")
         self.get_logger().info(f"Mission: {self.mission.status_text()}")
         self.get_logger().info(f"Target object: {target_object}")
+        self.get_logger().info("Navigation Manager telemetry enabled")
 
         self.timer = self.create_timer(0.5, self.update)
         self.status_timer = self.create_timer(0.25, self.publish_status)
@@ -89,15 +91,17 @@ class QwenRobotNode(Node):
         mission = msg.data.strip().upper()
 
         self.mission.set_mission(mission)
-        target = self.mission.get_target_object()
 
+        target = self.mission.get_target_object()
         if target is not None:
             self.tracker.set_target(target)
 
         self.search.reset()
+        self.navigation.reset()
 
         stop = Twist()
         self.cmd_pub.publish(stop)
+        self.last_cmd = stop
 
         self.get_logger().info(
             f"Mission changed to {self.mission.status_text()} target={target}"
@@ -110,7 +114,6 @@ class QwenRobotNode(Node):
                 desired_encoding="bgr8",
             )
             self.frame_count += 1
-
         except Exception as e:
             self.get_logger().warn(f"Camera conversion failed: {e}")
             self.latest_frame = None
@@ -130,15 +133,58 @@ class QwenRobotNode(Node):
 
         self.front_distance = min(front_ranges) if front_ranges else None
 
+    def estimate_bearing_deg(self, target):
+        if target is None:
+            return None
+
+        try:
+            cx = float(target.get("cx"))
+            image_width = 640.0
+            normalized = (cx - image_width / 2.0) / (image_width / 2.0)
+            camera_half_fov_deg = 30.0
+            return round(normalized * camera_half_fov_deg, 2)
+        except Exception:
+            return None
+
+    def update_navigation(self, target):
+        try:
+            tracker_tel = self.tracker.telemetry()
+        except Exception:
+            tracker_tel = {}
+
+        target_visible = target is not None
+        target_id = tracker_tel.get("target_id")
+        last_seen_age = tracker_tel.get("target_last_seen_age")
+
+        target_range = self.front_distance if target_visible else None
+        target_bearing = self.estimate_bearing_deg(target)
+
+        confidence = 0.0
+        if target is not None:
+            confidence = float(target.get("confidence", target.get("conf", 0.0)))
+
+        self.last_navigation = self.navigation.update(
+            target_visible=target_visible,
+            target_id=str(target_id) if target_id is not None else None,
+            last_seen_age_s=last_seen_age,
+            last_seen_range_m=target_range,
+            last_seen_bearing_deg=target_bearing,
+            confidence=confidence,
+        )
+
+        return self.last_navigation
+
     def update(self):
         self.loop_count += 1
 
         if not self.mission.should_move():
             stop = Twist()
             self.cmd_pub.publish(stop)
+
             self.last_cmd = stop
             self.last_state = "IDLE"
             self.last_target_label = "none"
+            self.last_navigation = self.navigation.reset()
             return
 
         if self.latest_frame is None:
@@ -150,6 +196,7 @@ class QwenRobotNode(Node):
         self.last_vision_time = time.time() - start
 
         target = self.tracker.select_target(detections)
+        navigation = self.update_navigation(target)
 
         cmd, motion_state = self.follow.compute_cmd(
             target,
@@ -176,6 +223,7 @@ class QwenRobotNode(Node):
         )
 
         self.cmd_pub.publish(cmd)
+
         self.last_cmd = cmd
         self.last_state = state
         self.last_target_label = target["label"] if target else "none"
@@ -186,12 +234,16 @@ class QwenRobotNode(Node):
             else "None"
         )
 
+        nav_state = navigation.get("state", "UNKNOWN")
+        nav_action = navigation.get("action", "UNKNOWN")
+
         if target is None:
             labels = [d.get("label") for d in detections if d.get("label")]
             self.get_logger().info(
                 f"LOOP {self.loop_count} | "
                 f"MISSION={self.mission.status_text()} | "
                 f"STATE={state} | "
+                f"NAV={nav_state}/{nav_action} | "
                 f"seen={labels} | "
                 f"front={lidar_text} | "
                 f"vx={cmd.linear.x:.2f} | "
@@ -204,6 +256,7 @@ class QwenRobotNode(Node):
             f"LOOP {self.loop_count} | "
             f"MISSION={self.mission.status_text()} | "
             f"STATE={state} | "
+            f"NAV={nav_state}/{nav_action} | "
             f"{target['label']} | "
             f"conf={target['confidence']:.2f} | "
             f"cx={target['cx']:.1f} | "
@@ -225,9 +278,9 @@ class QwenRobotNode(Node):
             "frames": self.frame_count,
             "loops": self.loop_count,
             "vision_time": self.last_vision_time,
+            "navigation": self.last_navigation,
         }
 
-        # v0.7 Target Manager / ReID telemetry
         try:
             status.update(self.tracker.telemetry())
         except Exception as e:
@@ -252,6 +305,7 @@ class QwenRobotNode(Node):
 
 def main(args=None):
     rclpy.init(args=args)
+
     node = QwenRobotNode()
 
     try:
